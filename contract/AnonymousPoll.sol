@@ -8,8 +8,9 @@ import {
 } from "@fhevm/solidity/lib/FHE.sol";
 import { EthereumConfig } from "@fhevm/solidity/config/ZamaConfig.sol";
 import { SafeERC20, IERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import { ReentrancyGuard } from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
-contract AnonymousPoll is EthereumConfig {
+contract AnonymousPoll is EthereumConfig, ReentrancyGuard {
     address public owner;
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
 
@@ -32,13 +33,13 @@ contract AnonymousPoll is EthereumConfig {
 
     struct Option {
         bytes encryptedOption;
-        string optionImageCID;
+        bytes encryptedOptionImageCID;
         euint64 encryptedVoteCount;
     }
 
     struct Poll {
         bytes encryptedQuestion;
-        string questionImageCID;
+        bytes encryptedQuestionImageCID;
         Option[] options;
         mapping(bytes32 => bool) hasVotedCommitment;
         mapping(bytes32 => euint64) userVotes;
@@ -110,10 +111,11 @@ contract AnonymousPoll is EthereumConfig {
         emit PollCreationFeeUpdated(newFee);
     }
 
-    function withdrawFees(address payable to) external onlyOwner {
+    function withdrawFees(address payable to) external onlyOwner nonReentrant {
         require(collectedFees > 0, "No fees");
         uint256 amount = collectedFees;
         collectedFees = 0;
+        
         (bool sent, ) = to.call{value: amount}("");
         require(sent, "Withdraw failed");
         emit FeesWithdrawn(to, amount);
@@ -125,15 +127,15 @@ contract AnonymousPoll is EthereumConfig {
 
     function createPoll(
         bytes calldata encryptedQuestion,
-        string calldata questionImageCID,
+        bytes calldata encryptedQuestionImageCID,
         bytes[] calldata encryptedOptions,
-        string[] calldata optionImageCIDs,
+        bytes[] calldata encryptedOptionImageCIDs,
         bool commentsAllowed,
         uint256 startTime,
         uint256 endTime
     ) external payable whenNotPaused returns (uint256) {
         require(msg.value == pollCreationFee, "Incorrect fee");
-        require(encryptedOptions.length == optionImageCIDs.length, "Options mismatch");
+        require(encryptedOptions.length == encryptedOptionImageCIDs.length, "Options mismatch");
         require(encryptedOptions.length >= 2, "Need at least 2 options");
         require(startTime < endTime, "Invalid poll time");
         require(startTime >= block.timestamp, "Start time in past");
@@ -146,7 +148,7 @@ contract AnonymousPoll is EthereumConfig {
 
         p.creator = msg.sender;
         p.encryptedQuestion = encryptedQuestion;
-        p.questionImageCID = questionImageCID;
+        p.encryptedQuestionImageCID = encryptedQuestionImageCID;
         p.isActive = true;
         p.commentsAllowed = commentsAllowed;
         p.startTime = startTime;
@@ -155,7 +157,7 @@ contract AnonymousPoll is EthereumConfig {
         for (uint256 i = 0; i < encryptedOptions.length; i++) {
             p.options.push(Option({
                 encryptedOption: encryptedOptions[i],
-                optionImageCID: optionImageCIDs[i],
+                encryptedOptionImageCID: encryptedOptionImageCIDs[i],
                 encryptedVoteCount: FHE.asEuint64(0)
             }));
             FHE.allowThis(p.options[i].encryptedVoteCount);
@@ -170,11 +172,11 @@ contract AnonymousPoll is EthereumConfig {
     function updatePollMetadata(
         uint256 pollId,
         bytes calldata newEncryptedQuestion,
-        string calldata newQuestionImageCID
+        bytes calldata newEncryptedQuestionImageCID
     ) external onlyCreator(pollId) pollActive(pollId) whenNotPaused {
         Poll storage p = polls[pollId];
         p.encryptedQuestion = newEncryptedQuestion;
-        p.questionImageCID = newQuestionImageCID;
+        p.encryptedQuestionImageCID = newEncryptedQuestionImageCID;
         emit PollMetadataUpdated(pollId);
     }
 
@@ -191,7 +193,6 @@ contract AnonymousPoll is EthereumConfig {
 
         euint64 weight = FHE.fromExternal(encryptedWeight, inputProof);
         p.options[optionId].encryptedVoteCount = FHE.add(p.options[optionId].encryptedVoteCount, weight);
-        FHE.allowThis(p.options[optionId].encryptedVoteCount);
 
         p.hasVotedCommitment[voterCommitment] = true;
         p.userVotes[voterCommitment] = weight;
@@ -280,5 +281,17 @@ contract AnonymousPoll is EthereumConfig {
             page[i - start] = creatorPolls[i];
         }
         return page;
+    }
+
+    function getEncryptedQuestionImageCID(uint256 pollId) external view returns (bytes memory) {
+        require(pollId < polls.length, "Invalid poll");
+        return polls[pollId].encryptedQuestionImageCID;
+    }
+
+    function getOptionEncryptedImageCID(uint256 pollId, uint256 optionId) external view returns (bytes memory) {
+        require(pollId < polls.length, "Invalid poll");
+        Poll storage p = polls[pollId];
+        require(optionId < p.options.length, "Invalid option");
+        return p.options[optionId].encryptedOptionImageCID;
     }
 }
