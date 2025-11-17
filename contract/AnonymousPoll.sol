@@ -4,7 +4,9 @@ pragma solidity >=0.7.0 <0.9.0;
 import {
     FHE,
     externalEuint64,
-    euint64
+    externalEuint256,
+    euint64,
+    euint256
 } from "@fhevm/solidity/lib/FHE.sol";
 import { EthereumConfig } from "@fhevm/solidity/config/ZamaConfig.sol";
 import { SafeERC20, IERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
@@ -31,24 +33,29 @@ contract AnonymousPoll is EthereumConfig, ReentrancyGuard {
     uint256 public pollCreationFee;
     uint256 public collectedFees;
 
+    uint256 public constant MAX_OPTIONS = 3;
+    uint256 public constant MAX_COMMENTS_PER_USER = 1;
+
     struct Option {
-        bytes encryptedOption;
-        bytes encryptedOptionImageCID;
+        euint256 encryptedOption;
+        euint256 encryptedOptionImageCID;
         euint64 encryptedVoteCount;
     }
 
     struct Poll {
-        bytes encryptedQuestion;
-        bytes encryptedQuestionImageCID;
+        euint256 encryptedQuestion;
+        euint256 encryptedQuestionImageCID;
         Option[] options;
         mapping(bytes32 => bool) hasVotedCommitment;
         mapping(bytes32 => euint64) userVotes;
-        mapping(bytes32 => bytes[]) encryptedComments;
+        mapping(bytes32 => euint256[]) encryptedComments;
         address creator;
         bool isActive;
+        bool revealed;
         bool commentsAllowed;
         uint256 startTime;
         uint256 endTime;
+        uint64[] revealedVoteCounts;
     }
 
     Poll[] private polls;
@@ -61,6 +68,8 @@ contract AnonymousPoll is EthereumConfig, ReentrancyGuard {
     event FeesWithdrawn(address indexed to, uint256 amount);
     event PollMetadataUpdated(uint256 indexed pollId);
     event PollCreationFeeUpdated(uint256 newFee);
+    event VotesRevealed(uint256 indexed pollId);
+    event EncryptedVoteCountForReveal(uint256 indexed pollId, uint256 indexed optionId, euint64 encryptedVoteCount);
 
     modifier onlyCreator(uint256 pollId) {
         require(pollId < polls.length && polls[pollId].creator == msg.sender, "Not authorized");
@@ -75,7 +84,14 @@ contract AnonymousPoll is EthereumConfig, ReentrancyGuard {
     modifier pollOpen(uint256 pollId) {
         require(pollId < polls.length, "Invalid poll");
         Poll storage p = polls[pollId];
-        require(block.timestamp >= p.startTime && block.timestamp <= p.endTime, "Poll closed");
+        if (block.timestamp > p.endTime) {
+            if (p.isActive) {
+                p.isActive = false;
+                emit PollClosed(pollId);
+            }
+            revert("Poll closed");
+        }
+        require(block.timestamp >= p.startTime, "Poll not started");
         _;
     }
 
@@ -115,7 +131,6 @@ contract AnonymousPoll is EthereumConfig, ReentrancyGuard {
         require(collectedFees > 0, "No fees");
         uint256 amount = collectedFees;
         collectedFees = 0;
-        
         (bool sent, ) = to.call{value: amount}("");
         require(sent, "Withdraw failed");
         emit FeesWithdrawn(to, amount);
@@ -125,18 +140,26 @@ contract AnonymousPoll is EthereumConfig, ReentrancyGuard {
         SafeERC20.safeTransfer(IERC20(tokenAddress), owner, amount);
     }
 
+    function recoverStuckETH(address payable to) external onlyOwner nonReentrant {
+        uint256 stuckAmount = address(this).balance - collectedFees;
+        require(stuckAmount > 0, "No stuck ETH");
+        (bool sent, ) = to.call{value: stuckAmount}("");
+        require(sent, "Withdraw failed");
+    }
+
     function createPoll(
-        bytes calldata encryptedQuestion,
-        bytes calldata encryptedQuestionImageCID,
-        bytes[] calldata encryptedOptions,
-        bytes[] calldata encryptedOptionImageCIDs,
+        externalEuint256 encryptedQuestion,
+        externalEuint256 encryptedQuestionImageCID,
+        externalEuint256[] calldata encryptedOptions,
+        externalEuint256[] calldata encryptedOptionImageCIDs,
+        bytes calldata inputProof,
         bool commentsAllowed,
         uint256 startTime,
         uint256 endTime
     ) external payable whenNotPaused returns (uint256) {
         require(msg.value == pollCreationFee, "Incorrect fee");
         require(encryptedOptions.length == encryptedOptionImageCIDs.length, "Options mismatch");
-        require(encryptedOptions.length >= 2, "Need at least 2 options");
+        require(encryptedOptions.length >= 2 && encryptedOptions.length <= MAX_OPTIONS, "Invalid options count");
         require(startTime < endTime, "Invalid poll time");
         require(startTime >= block.timestamp, "Start time in past");
 
@@ -147,19 +170,27 @@ contract AnonymousPoll is EthereumConfig, ReentrancyGuard {
         Poll storage p = polls[pollId];
 
         p.creator = msg.sender;
-        p.encryptedQuestion = encryptedQuestion;
-        p.encryptedQuestionImageCID = encryptedQuestionImageCID;
+        p.encryptedQuestion = FHE.fromExternal(encryptedQuestion, inputProof);
+        p.encryptedQuestionImageCID = FHE.fromExternal(encryptedQuestionImageCID, inputProof);
         p.isActive = true;
+        p.revealed = false;
         p.commentsAllowed = commentsAllowed;
         p.startTime = startTime;
         p.endTime = endTime;
 
+        FHE.allowThis(p.encryptedQuestion);
+        FHE.allowThis(p.encryptedQuestionImageCID);
+
         for (uint256 i = 0; i < encryptedOptions.length; i++) {
+            euint256 encOpt = FHE.fromExternal(encryptedOptions[i], inputProof);
+            euint256 encCID = FHE.fromExternal(encryptedOptionImageCIDs[i], inputProof);
             p.options.push(Option({
-                encryptedOption: encryptedOptions[i],
-                encryptedOptionImageCID: encryptedOptionImageCIDs[i],
+                encryptedOption: encOpt,
+                encryptedOptionImageCID: encCID,
                 encryptedVoteCount: FHE.asEuint64(0)
             }));
+            FHE.allowThis(encOpt);
+            FHE.allowThis(encCID);
             FHE.allowThis(p.options[i].encryptedVoteCount);
         }
 
@@ -171,12 +202,15 @@ contract AnonymousPoll is EthereumConfig, ReentrancyGuard {
 
     function updatePollMetadata(
         uint256 pollId,
-        bytes calldata newEncryptedQuestion,
-        bytes calldata newEncryptedQuestionImageCID
+        externalEuint256 newEncryptedQuestion,
+        externalEuint256 newEncryptedQuestionImageCID,
+        bytes calldata inputProof
     ) external onlyCreator(pollId) pollActive(pollId) whenNotPaused {
         Poll storage p = polls[pollId];
-        p.encryptedQuestion = newEncryptedQuestion;
-        p.encryptedQuestionImageCID = newEncryptedQuestionImageCID;
+        p.encryptedQuestion = FHE.fromExternal(newEncryptedQuestion, inputProof);
+        p.encryptedQuestionImageCID = FHE.fromExternal(newEncryptedQuestionImageCID, inputProof);
+        FHE.allowThis(p.encryptedQuestion);
+        FHE.allowThis(p.encryptedQuestionImageCID);
         emit PollMetadataUpdated(pollId);
     }
 
@@ -203,20 +237,49 @@ contract AnonymousPoll is EthereumConfig, ReentrancyGuard {
     function submitComment(
         uint256 pollId,
         bytes32 voterCommitment,
-        bytes calldata encryptedComment
+        externalEuint256 encryptedComment,
+        bytes calldata inputProof
     ) external pollActive(pollId) pollOpen(pollId) whenNotPaused {
         Poll storage p = polls[pollId];
         require(p.commentsAllowed, "Comments disabled");
         require(p.hasVotedCommitment[voterCommitment], "Must vote to comment");
-        require(encryptedComment.length > 0, "Empty comment");
-        p.encryptedComments[voterCommitment].push(encryptedComment);
+        require(p.encryptedComments[voterCommitment].length < MAX_COMMENTS_PER_USER, "Max comments reached");
+
+        euint256 encComment = FHE.fromExternal(encryptedComment, inputProof);
+        FHE.allowThis(encComment);
+        p.encryptedComments[voterCommitment].push(encComment);
+
         emit CommentSubmitted(pollId, voterCommitment);
     }
 
     function closePoll(uint256 pollId) external onlyCreator(pollId) {
         require(pollId < polls.length, "Invalid poll");
-        polls[pollId].isActive = false;
+        Poll storage p = polls[pollId];
+        require(p.isActive, "Already closed");
+        p.isActive = false;
         emit PollClosed(pollId);
+    }
+
+    function revealVoteCounts(uint256 pollId) external onlyCreator(pollId) {
+        Poll storage p = polls[pollId];
+        require(block.timestamp > p.endTime, "Poll not ended");
+        require(!p.revealed, "Already revealed");
+        p.revealed = true;
+        for (uint256 i = 0; i < p.options.length; i++) {
+            emit EncryptedVoteCountForReveal(pollId, i, p.options[i].encryptedVoteCount);
+        }
+        emit VotesRevealed(pollId);
+    }
+
+    function submitRevealedVoteCounts(uint256 pollId, uint64[] calldata revealedCounts) external onlyCreator(pollId) {
+        Poll storage p = polls[pollId];
+        require(!p.revealed || p.revealedVoteCounts.length == 0, "Already revealed");
+        require(revealedCounts.length == p.options.length, "Mismatched counts");
+        for (uint256 i = 0; i < revealedCounts.length; i++) {
+            p.revealedVoteCounts.push(revealedCounts[i]);
+        }
+        p.revealed = true;
+        emit VotesRevealed(pollId);
     }
 
     function getEncryptedVoteCount(uint256 pollId, uint256 optionId) external view returns (euint64) {
@@ -226,9 +289,24 @@ contract AnonymousPoll is EthereumConfig, ReentrancyGuard {
         return p.options[optionId].encryptedVoteCount;
     }
 
-    function getEncryptedComments(uint256 pollId, bytes32 voterCommitment) external view returns (bytes[] memory) {
+    function getRevealedVoteCount(uint256 pollId, uint256 optionId) external view returns (uint64) {
         require(pollId < polls.length, "Invalid poll");
-        return polls[pollId].encryptedComments[voterCommitment];
+        Poll storage p = polls[pollId];
+        require(p.revealed, "Not revealed");
+        require(optionId < p.options.length, "Invalid option");
+        return p.revealedVoteCounts[optionId];
+    }
+
+    function getEncryptedComment(uint256 pollId, bytes32 voterCommitment, uint256 commentIndex) external view returns (euint256) {
+        require(pollId < polls.length, "Invalid poll");
+        Poll storage p = polls[pollId];
+        require(commentIndex < p.encryptedComments[voterCommitment].length, "Invalid comment index");
+        return p.encryptedComments[voterCommitment][commentIndex];
+    }
+
+    function getEncryptedCommentsCount(uint256 pollId, bytes32 voterCommitment) external view returns (uint256) {
+        require(pollId < polls.length, "Invalid poll");
+        return polls[pollId].encryptedComments[voterCommitment].length;
     }
 
     function getPollsByCreator(address creator) external view returns (uint256[] memory) {
@@ -237,6 +315,7 @@ contract AnonymousPoll is EthereumConfig, ReentrancyGuard {
 
     function getPollSummary(uint256 pollId) external view returns (
         bool isActive,
+        bool revealed,
         bool commentsAllowed,
         uint256 optionsCount,
         uint256 startTime,
@@ -247,6 +326,7 @@ contract AnonymousPoll is EthereumConfig, ReentrancyGuard {
         Poll storage p = polls[pollId];
         return (
             p.isActive,
+            p.revealed,
             p.commentsAllowed,
             p.options.length,
             p.startTime,
@@ -271,7 +351,9 @@ contract AnonymousPoll is EthereumConfig, ReentrancyGuard {
     function getPollsByCreatorPaged(address creator, uint256 start, uint256 count) external view returns (uint256[] memory) {
         uint256[] storage creatorPolls = pollsByCreator[creator];
         uint256 length = creatorPolls.length;
-        if (start >= length) return new uint256[](0);
+        if (start >= length) {
+            return new uint256[](0);
+        }
 
         uint256 end = start + count;
         if (end > length) end = length;
@@ -283,12 +365,24 @@ contract AnonymousPoll is EthereumConfig, ReentrancyGuard {
         return page;
     }
 
-    function getEncryptedQuestionImageCID(uint256 pollId) external view returns (bytes memory) {
+    function getEncryptedQuestion(uint256 pollId) external view returns (euint256) {
+        require(pollId < polls.length, "Invalid poll");
+        return polls[pollId].encryptedQuestion;
+    }
+
+    function getEncryptedQuestionImageCID(uint256 pollId) external view returns (euint256) {
         require(pollId < polls.length, "Invalid poll");
         return polls[pollId].encryptedQuestionImageCID;
     }
 
-    function getOptionEncryptedImageCID(uint256 pollId, uint256 optionId) external view returns (bytes memory) {
+    function getEncryptedOption(uint256 pollId, uint256 optionId) external view returns (euint256) {
+        require(pollId < polls.length, "Invalid poll");
+        Poll storage p = polls[pollId];
+        require(optionId < p.options.length, "Invalid option");
+        return p.options[optionId].encryptedOption;
+    }
+
+    function getOptionEncryptedImageCID(uint256 pollId, uint256 optionId) external view returns (euint256) {
         require(pollId < polls.length, "Invalid poll");
         Poll storage p = polls[pollId];
         require(optionId < p.options.length, "Invalid option");

@@ -1,0 +1,59 @@
+
+
+  AnonymousPoll Exhaustive Tests
+    ✔ owner, defaults, ownership transfers and renounce
+    ✔ onlyOwner restrictions
+    ✔ pause/unpause blocks actions and resumes them
+    1) createPoll validation checks
+    ✔ getPollsByCreatorPaged and pollsByCreatorCount
+    ✔ updatePollMetadata authorisation and active checks
+    ✔ closePoll only creator
+    ✔ withdrawFees resets collectedFees and cannot withdraw when zero
+    ✔ recoverERC20 transfers tokens back to owner only
+    ✔ getEncryptedQuestionImageCID and getOptionEncryptedImageCID boundaries
+    2) voting flow: time gating, invalid option, double voting, encrypted counts exist
+    3) submitComment flows: disabled, must vote, proper retrieval
+    ✔ isPollCreator false case + totals
+    ✔ reentrancy: collectedFees behaviour and attacker resistant
+
+
+  11 passing (530ms)
+  3 failing
+
+  1) AnonymousPoll Exhaustive Tests
+       createPoll validation checks:
+     AssertionError: Expected transaction to be reverted with reason 'Invalid poll time', but it reverted with reason 'Need at least 2 options'
+      at async Context.<anonymous> (test/AnonymousPollTEST.test.ts:68:5)
+
+  2) AnonymousPoll Exhaustive Tests
+       voting flow: time gating, invalid option, double voting, encrypted counts exist:
+     Error: VM Exception while processing transaction: reverted with custom error 'InvalidType()'
+    at FHEVMExecutor.<unknown> (0xe3a9105a3a932253a70f126eb1e3b589c643dd24, @fhevm/host-contracts/contracts/FHEVMExecutor.sol:0:0)
+    at AnonymousPoll.verify (@fhevm/solidity/lib/Impl.sol:609)
+    at AnonymousPoll.fromExternal (@fhevm/solidity/lib/FHE.sol:8334)
+    at AnonymousPoll.vote (contracts/AnonymousPoll.sol:194)
+    at EdrProviderWrapper.request (node_modules/hardhat/src/internal/hardhat-network/provider/provider.ts:359:41)
+    at async FhevmProviderExtender._handleEthSendTransaction (node_modules/@fhevm/hardhat-plugin/src/internal/provider/FhevmProviderExtender.ts:108:14)
+    at async HardhatEthersSigner.sendTransaction (node_modules/@nomicfoundation/hardhat-ethers/src/signers.ts:181:18)
+    at async send (node_modules/ethers/src.ts/contract/contract.ts:313:20)
+    at async Proxy.vote (node_modules/ethers/src.ts/contract/contract.ts:352:16)
+    at async Context.<anonymous> (test/AnonymousPollTEST.test.ts:177:5)
+  
+
+  3) AnonymousPoll Exhaustive Tests
+       submitComment flows: disabled, must vote, proper retrieval:
+     Error: VM Exception while processing transaction: reverted with custom error 'InvalidType()'
+    at FHEVMExecutor.<unknown> (0xe3a9105a3a932253a70f126eb1e3b589c643dd24, @fhevm/host-contracts/contracts/FHEVMExecutor.sol:0:0)
+    at AnonymousPoll.verify (@fhevm/solidity/lib/Impl.sol:609)
+    at AnonymousPoll.fromExternal (@fhevm/solidity/lib/FHE.sol:8334)
+    at AnonymousPoll.vote (contracts/AnonymousPoll.sol:194)
+    at EdrProviderWrapper.request (node_modules/hardhat/src/internal/hardhat-network/provider/provider.ts:359:41)
+    at async FhevmProviderExtender._handleEthSendTransaction (node_modules/@fhevm/hardhat-plugin/src/internal/provider/FhevmProviderExtender.ts:108:14)
+    at async HardhatEthersSigner.sendTransaction (node_modules/@nomicfoundation/hardhat-ethers/src/signers.ts:181:18)
+    at async send (node_modules/ethers/src.ts/contract/contract.ts:313:20)
+    at async Proxy.vote (node_modules/ethers/src.ts/contract/contract.ts:352:16)
+    at async Context.<anonymous> (test/AnonymousPollTEST.test.ts:200:5)
+  
+
+
+
